@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Interactive SVG Drawing Tool</title>
+  <style>
+    :root{
+      --ui-bg: #f7f7f9;
+      --panel-bg: #fff;
+      --accent: #2563eb;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+    }
+
+    body {
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+      margin: 0;
+      padding: 20px;
+      background: linear-gradient(180deg, #fbfdff, #f7f9fc);
+      color: #0f172a;
+    }
+
+    .app {
+      max-width: 1000px;
+      margin: 0 auto;
+      background: var(--panel-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: 0 6px 18px rgba(14, 30, 37, 0.06);
+      padding: 16px;
+    }
+
+    header {
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      margin-bottom: 12px;
+    }
+
+    h1 {
+      font-size: 18px;
+      margin: 0;
+    }
+
+    .controls {
+      display:flex;
+      gap:8px;
+      align-items:center;
+      flex-wrap:wrap;
+    }
+
+    label {
+      font-size: 13px;
+      color: var(--muted);
+      display:flex;
+      gap:6px;
+      align-items:center;
+    }
+
+    select, input[type="color"], input[type="number"], button {
+      padding: 6px 8px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--ui-bg);
+      font-size: 14px;
+    }
+
+    input[type="number"]{
+      width:72px;
+    }
+
+    button {
+      cursor:pointer;
+      background: var(--accent);
+      color: white;
+      border: none;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-weight: 600;
+    }
+
+    button.secondary {
+      background: #efefef;
+      color: #111827;
+      font-weight: 500;
+    }
+
+    .canvas-wrap {
+      margin-top: 12px;
+      border: 1px dashed var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      background: white;
+    }
+
+    /* Make SVG responsive */
+    svg {
+      display:block;
+      width: 100%;
+      height: 500px; /* default height, responsive width */
+      touch-action: none; /* improves pointer/touch drawing */
+      cursor: crosshair;
+      background: linear-gradient(180deg, rgba(37,99,235,0.02), rgba(0,0,0,0.01));
+    }
+
+    /* styling for drawn shapes' default classes */
+    .drawn-shape {
+      stroke: #111827;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      fill: transparent;
+    }
+
+    .rect-fill {
+      fill-opacity: 0.06;
+    }
+
+    .hint {
+      margin-top:8px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div class="app" role="application" aria-label="SVG drawing tool">
+    <header>
+      <h1>Interactive SVG Drawing Tool</h1>
+
+      <div class="controls" role="toolbar" aria-label="Drawing controls">
+        <label>
+          Shape:
+          <select id="shape-select" aria-label="Select shape to draw">
+            <option value="line">Line</option>
+            <option value="rect">Rectangle</option>
+            <option value="circle">Circle</option>
+          </select>
+        </label>
+
+        <label>
+          Stroke width:
+          <input id="stroke-width" type="number" min="1" max="20" value="3" aria-label="Stroke width (px)">
+        </label>
+
+        <label>
+          Color:
+          <input id="color" type="color" value="#111827" aria-label="Stroke color">
+        </label>
+
+        <button id="clear-btn" class="secondary" title="Clear all shapes">Clear</button>
+        <button id="export-btn" title="Export SVG as file">Export SVG</button>
+      </div>
+    </header>
+
+    <div class="canvas-wrap">
+      <!-- SVG drawing area -->
+      <svg id="svg-canvas" xmlns="http://www.w3.org/2000/svg" aria-label="Drawing canvas" role="img">
+        <!-- Shapes will be created here dynamically -->
+      </svg>
+    </div>
+
+    <p class="hint">Click and drag inside the canvas to draw. Use the controls to change shape, stroke width, and color. Shapes remain until you clear them.</p>
+  </div>
+
+  <script>
+    // Namespace for SVG
+    const SVG_NS = "http://www.w3.org/2000/svg";
+
+    // UI references
+    const svg = document.getElementById('svg-canvas');
+    const shapeSelect = document.getElementById('shape-select');
+    const strokeWidthInput = document.getElementById('stroke-width');
+    const colorInput = document.getElementById('color');
+    const clearBtn = document.getElementById('clear-btn');
+    const exportBtn = document.getElementById('export-btn');
+
+    // State for current drawing
+    let drawing = false;           // whether user is currently drawing
+    let currentShape = null;       // the DOM element being created (line/rect/circle)
+    let startPoint = { x: 0, y: 0 };// starting point of the shape (in SVG coords)
+
+    // Utility: convert page/client coordinates to SVG coordinates
+    function toSVGPoint(clientX, clientY) {
+      const pt = svg.createSVGPoint();
+      pt.x = clientX;
+      pt.y = clientY;
+      // matrixTransform requires getScreenCTM to exist; in some environments it might be null - guard it
+      const ctm = svg.getScreenCTM();
+      if (ctm) {
+        return pt.matrixTransform(ctm.inverse());
+      } else {
+        // fallback: approximate using bounding rect
+        const rect = svg.getBoundingClientRect();
+        return { x: clientX - rect.left, y: clientY - rect.top };
+      }
+    }
+
+    // Create new SVG element with common attributes
+    function createSVGElement(tag, attrs = {}) {
+      const el = document.createElementNS(SVG_NS, tag);
+      el.classList.add('drawn-shape');
+      for (const [k, v] of Object.entries(attrs)) {
+        el.setAttribute(k, v);
+      }
+      return el;
+    }
+
+    // Mouse event handlers
+    function onPointerDown(e) {
+      // Only start on left mouse button (button === 0) for mouse; for touch/pointer allow
+      if (e.type === 'mousedown' && e.button !== 0) return;
+
+      // Prevent default to avoid unwanted selection/scrolling
+      e.preventDefault();
+
+      const p = toSVGPoint(e.clientX, e.clientY);
+      startPoint = { x: p.x, y: p.y };
+      drawing = true;
+
+      const shape = shapeSelect.value;
+      const stroke = colorInput.value;
+      const strokeWidth = Math.max(1, Number(strokeWidthInput.value) || 1);
+
+      if (shape === 'line') {
+        currentShape = createSVGElement('line', {
+          x1: startPoint.x, y1: startPoint.y, x2: startPoint.x, y2: startPoint.y,
+          stroke: stroke, 'stroke-width': strokeWidth
+        });
+      } else if (shape === 'rect') {
+        // Create rect with 0 width/height, we'll update as mouse moves
+        currentShape = createSVGElement('rect', {
+          x: startPoint.x, y: startPoint.y, width: 0, height: 0,
+          stroke: stroke, 'stroke-width': strokeWidth, fill: stroke, 'class': 'drawn-shape rect-fill'
+        });
+        currentShape.setAttribute('fill-opacity', 0.06); // subtle fill
+        currentShape.setAttribute('fill', stroke);
+      } else if (shape === 'circle') {
+        currentShape = createSVGElement('circle', {
+          cx: startPoint.x, cy: startPoint.y, r: 0,
+          stroke: stroke, 'stroke-width': strokeWidth, fill: stroke
+        });
+        currentShape.setAttribute('fill-opacity', 0.06);
+      }
+
+      if (currentShape) {
+        // Add to SVG DOM
+        svg.appendChild(currentShape);
+
+        // For pointer events (touch etc.), capture pointer to continue receiving events outside element
+        if (e.pointerId) {
+          e.target.setPointerCapture && e.target.setPointerCapture(e.pointerId);
+        }
+      }
+    }
+
+    function onPointerMove(e) {
+      if (!drawing || !currentShape) return;
+      e.preventDefault();
+
+      const p = toSVGPoint(e.clientX, e.clientY);
+      const x = p.x, y = p.y;
+
+      const shape = currentShape.nodeName.toLowerCase();
+
+      if (shape === 'line') {
+        currentShape.setAttribute('x2', x);
+        currentShape.setAttribute('y2', y);
+      } else if (shape === 'rect') {
+        // Compute x,y,width,height to allow dragging in any direction
+        const x0 = startPoint.x, y0 = startPoint.y;
+        const rx = Math.min(x0, x);
+        const ry = Math.min(y0, y);
+        const rw = Math.abs(x - x0);
+        const rh = Math.abs(y - y0);
+        currentShape.setAttribute('x', rx);
+        currentShape.setAttribute('y', ry);
+        currentShape.setAttribute('width', rw);
+        currentShape.setAttribute('height', rh);
+      } else if (shape === 'circle') {
+        // Circle radius based on distance from startPoint to current pointer
+        const dx = x - startPoint.x;
+        const dy = y - startPoint.y;
+        const r = Math.sqrt(dx * dx + dy * dy);
+        currentShape.setAttribute('r', r);
+        currentShape.setAttribute('cx', startPoint.x);
+        currentShape.setAttribute('cy', startPoint.y);
+      }
+    }
+
+    function onPointerUp(e) {
+      if (!drawing) return;
+      e.preventDefault();
+
+      // Release pointer capture if present
+      if (e.pointerId) {
+        try { e.target.releasePointerCapture && e.target.releasePointerCapture(e.pointerId); } catch (err) {}
+      }
+
+      // Finalize: if shape is degenerate (zero length/size), remove it
+      if (currentShape) {
+        const tag = currentShape.nodeName.toLowerCase();
+        let keep = true;
+        if (tag === 'line') {
+          const x1 = parseFloat(currentShape.getAttribute('x1') || 0);
+          const y1 = parseFloat(currentShape.getAttribute('y1') || 0);
+          const x2 = parseFloat(currentShape.getAttribute('x2') || 0);
+          const y2 = parseFloat(currentShape.getAttribute('y2') || 0);
+          const dist = Math.hypot(x2 - x1, y2 - y1);
+          if (dist < 2) keep = false;
+        } else if (tag === 'rect') {
+          const w = parseFloat(currentShape.getAttribute('width') || 0);
+          const h = parseFloat(currentShape.getAttribute('height') || 0);
+          if (w < 2 || h < 2) keep = false;
+        } else if (tag === 'circle') {
+          const r = parseFloat(currentShape.getAttribute('r') || 0);
+          if (r < 1) keep = false;
+        }
+
+        if (!keep) {
+          currentShape.remove();
+        } else {
+          // ensure final shape attributes use chosen stroke color/width (in case controls changed mid-draw)
+          currentShape.setAttribute('stroke', colorInput.value);
+          currentShape.setAttribute('stroke-width', Math.max(1, Number(strokeWidthInput.value) || 1));
+        }
+      }
+
+      // Reset state
+      drawing = false;
+      currentShape = null;
+    }
+
+    // If the mouse leaves the SVG while drawing, finalize the shape (like mouseup)
+    function onPointerLeave(e) {
+      if (drawing) {
+        onPointerUp(e);
+      }
+    }
+
+    // Attach mouse events (mousedown / mousemove / mouseup)
+    svg.addEventListener('mousedown', onPointerDown);
+    window.addEventListener('mousemove', onPointerMove);
+    window.addEventListener('mouseup', onPointerUp);
+    svg.addEventListener('mouseleave', onPointerLeave);
+
+    // Also attach pointer events for better touch support (optional)
+    svg.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    svg.addEventListener('pointerleave', onPointerLeave);
+    svg.addEventListener('pointercancel', onPointerUp);
+
+    // Clear button: remove all shapes
+    clearBtn.addEventListener('click', () => {
+      // Remove all children of svg
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+    });
+
+    // Export button: download the SVG as a file
+    exportBtn.addEventListener('click', () => {
+      // Clone SVG and set explicit width/height for export
+      const clone = svg.cloneNode(true);
+      const width = svg.clientWidth || 800;
+      const height = svg.clientHeight || 500;
+      clone.setAttribute('width', width);
+      clone.setAttribute('height', height);
+      // Inline CSS for shapes (optional)
+      clone.setAttribute('xmlns', SVG_NS);
+
+      const serializer = new XMLSerializer();
+      const svgString = serializer.serializeToString(clone);
+      const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'drawing.svg';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    });
+
+    // Keyboard / accessibility enhancements:
+    // Allow pressing Escape to cancel an in-progress drawing
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && drawing) {
+        if (currentShape) currentShape.remove();
+        drawing = false;
+        currentShape = null;
+      }
+    });
+
+    // Initialization: draw a light grid background (optional, non-interactive)
+    function drawGrid(spacing = 50, color = '#e6eefc') {
+      const bbox = svg.getBoundingClientRect();
+      const w = Math.max(800, bbox.width);
+      const h = Math.max(500, bbox.height);
+      for (let x = 0; x <= w; x += spacing) {
+        const line = createSVGElement('line', {
+          x1: x, y1: 0, x2: x, y2: h, stroke: color, 'stroke-width': 0.6
+        });
+        line.setAttribute('pointer-events', 'none');
+        svg.appendChild(line);
+      }
+      for (let y = 0; y <= h; y += spacing) {
+        const line = createSVGElement('line', {
+          x1: 0, y1: y, x2: w, y2: y, stroke: color, 'stroke-width': 0.6
+        });
+        line.setAttribute('pointer-events', 'none');
+        svg.appendChild(line);
+      }
+    }
+
+    // Optionally draw a subtle grid. Comment out if you don't want it.
+    drawGrid(80);
+
+    // Ensure the SVG scales nicely on window resize (grid may remain static - it's optional)
+    window.addEventListener('resize', () => {
+      // no heavy work needed; SVG is responsive due to CSS width:100%
+    });
+  </script>
+</body>
+</html>
